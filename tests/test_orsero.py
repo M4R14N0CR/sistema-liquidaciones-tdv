@@ -47,7 +47,61 @@ Costos totales $ 40.777,20
 """
 
 
+# OCR real (Cala Pula v. 31): comas perdidas en precio y facturación.
+TEXTO_OCR_SIN_COMAS = """
+Cala Pula v. 31
+
+| Setubal | pit | caja/plt | total cajas | ventas €/ caja] facturacion |
+| cals | 5 | 65 | 325 | 160 |  520/0€l
+| caló | 16 | 65 | 1040 | 1650 | 1716000€l
+| total | 21 | | 1365 | 1638 | 2236001
+| grand total | 21 1.365 22.360,00 €
+
+cambio $/€: 1,1535
+"""
+
+# OCR real (Cala Pino v. 29): total de cajas de cal 6 ilegible.
+TEXTO_OCR_TOTAL_DANADO = """
+Cala Pino v. 29
+
+| Setubal | pit | caja/plt | total cajas | ventas €/ caja] facturacion |
+| cals | 5 | 65 | 325] 140 | assoo0€l
+| caló | 16 | 65 | 2o0s0| 1550 | 16:120,00€|
+| total | 21 | | 1.365 | 15,14 | 20.670,00 |
+
+cambio $/€: 1,1418
+"""
+
+
 class ExtraccionOrseroTests(TestCase):
+    def _precios(self, liq):
+        return [
+            (p.destino, p.calibre, p.total_cajas, p.precio_eur)
+            for p in liq.precios
+        ]
+
+    def test_ocr_sin_comas_no_confunde_caja_plt_con_total(self):
+        liq = parsear_texto_liquidacion_orsero(TEXTO_OCR_SIN_COMAS)
+        self.assertEqual(
+            self._precios(liq),
+            [
+                ("SETUBAL", 5, 325, Decimal("16.00")),
+                ("SETUBAL", 6, 1040, Decimal("16.50")),
+            ],
+        )
+        self.assertEqual(liq.total_cajas, 1365)
+
+    def test_total_danado_se_recupera_con_pallets(self):
+        liq = parsear_texto_liquidacion_orsero(TEXTO_OCR_TOTAL_DANADO)
+        self.assertEqual(
+            self._precios(liq),
+            [
+                ("SETUBAL", 5, 325, Decimal("14.00")),
+                ("SETUBAL", 6, 1040, Decimal("15.50")),
+            ],
+        )
+        self.assertEqual(liq.total_cajas, 1365)
+
     def test_parsea_semana_cambio_precios_y_gastos(self):
         liq = parsear_texto_liquidacion_orsero(TEXTO_OCR_MUESTRA)
         self.assertEqual(liq.semana, 24)

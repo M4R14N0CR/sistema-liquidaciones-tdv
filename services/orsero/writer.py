@@ -349,9 +349,12 @@ def redimensionar_tabla_orsero(
                 timeout_segundos=90,
             )
             tabla.Resize(nuevo_rango)
+            # Excel arranca trabajo interno ~1 s después del Resize;
+            # mientras dura, las llamadas COM devuelven basura.
+            time.sleep(1.5)
             esperar_excel_listo(
                 aplicacion=aplicacion,
-                timeout_segundos=90,
+                timeout_segundos=600,
             )
             return
         except (com_error, ErrorEscrituraDimanno) as error:
@@ -375,6 +378,17 @@ def _desactivar_refresco_pivots(libro: xw.Book) -> None:
     for indice in range(1, total + 1):
         try:
             caches(indice).EnableRefresh = False
+        except com_error:
+            continue
+
+
+def _desactivar_calculo_hojas(libro: xw.Book) -> None:
+    # Aun en modo manual, al redimensionar Tabla1 Excel recalcula en
+    # segundo plano las fórmulas con vínculos externos y bloquea COM
+    # varios minutos. EnableCalculation no se guarda en el archivo.
+    for hoja in libro.sheets:
+        try:
+            hoja.api.EnableCalculation = False
         except com_error:
             continue
 
@@ -429,20 +443,55 @@ def _propagar_formulas_columnas(
     except Exception:
         pass
 
+    # No leer FormulaR1C1 de la plantilla por adelantado: en celdas
+    # con vínculos externos (p. ej. "GEO Total €") Excel intenta
+    # resolver el libro vinculado y una sola lectura tarda minutos.
+    # El texto solo se pide si una columna necesita reparación.
+    try:
+        valores_plantilla = fila_plantilla.Value2
+    except com_error:
+        valores_plantilla = None
+    if isinstance(valores_plantilla, (list, tuple)):
+        fila_valores = valores_plantilla[0]
+        if not isinstance(fila_valores, (list, tuple)):
+            fila_valores = valores_plantilla
+    else:
+        fila_valores = (valores_plantilla,)
+
+    def _valor_plantilla(indice: int) -> Any:
+        if 1 <= indice <= len(fila_valores):
+            return fila_valores[indice - 1]
+        return None
+
     indices_formula: list[int] = []
-    formula_por_indice: dict[int, str] = {}
+    indices_con_formula: set[int] = set()
     for nombre in columnas_formula:
         if nombre not in posiciones:
             continue
         indice = posiciones[nombre]
         try:
-            formula = fila_plantilla.Cells(1, indice).FormulaR1C1
+            tiene_formula = bool(
+                fila_plantilla.Cells(1, indice).HasFormula
+            )
         except com_error:
             continue
-        if not formula:
+        valor = _valor_plantilla(indice)
+        if not tiene_formula and (valor is None or valor == ""):
             continue
         indices_formula.append(indice)
-        formula_por_indice[indice] = formula
+        if tiene_formula:
+            indices_con_formula.add(indice)
+
+    formulas_leidas: dict[int, str | None] = {}
+
+    def _formula_plantilla(indice: int) -> str | None:
+        if indice not in formulas_leidas:
+            try:
+                formula = fila_plantilla.Cells(1, indice).FormulaR1C1
+            except com_error:
+                formula = None
+            formulas_leidas[indice] = formula or None
+        return formulas_leidas[indice]
 
     grupos = _grupos_columnas_contiguas(indices_formula)
     bloques_ok = 0
@@ -488,7 +537,7 @@ def _propagar_formulas_columnas(
                 except com_error:
                     pass
                 for indice in range(col_ini, col_fin + 1):
-                    formula = formula_por_indice.get(indice)
+                    formula = _formula_plantilla(indice)
                     if not formula:
                         continue
                     try:
@@ -505,9 +554,11 @@ def _propagar_formulas_columnas(
                                 continue
 
         # Spot-check: primera y última fila (no todas las celdas).
+        # Las columnas con constante en la plantilla ya quedaron
+        # copiadas y no se pueden validar con HasFormula.
         filas_check = (1,) if filas == 1 else (1, filas)
         reparadas = 0
-        for indice, formula in formula_por_indice.items():
+        for indice in sorted(indices_con_formula):
             faltantes = False
             for fila_i in filas_check:
                 try:
@@ -522,6 +573,9 @@ def _propagar_formulas_columnas(
                     faltantes = True
                     break
             if not faltantes:
+                continue
+            formula = _formula_plantilla(indice)
+            if not formula:
                 continue
             try:
                 rango_nuevas.Cells(1, indice).Resize(
@@ -544,7 +598,7 @@ def _propagar_formulas_columnas(
             _contexto_generacion.get(),
             bloques_ok,
             len(grupos),
-            len(formula_por_indice),
+            len(indices_formula),
             reparadas,
         )
         esperar_excel_listo(
@@ -630,6 +684,7 @@ def escribir_archivo_orsero(
         except (com_error, AttributeError):
             pass
         _desactivar_refresco_pivots(libro)
+        _desactivar_calculo_hojas(libro)
         esperar_excel_listo(
             aplicacion=aplicacion,
             timeout_segundos=120,

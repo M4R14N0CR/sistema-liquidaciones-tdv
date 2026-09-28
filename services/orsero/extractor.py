@@ -298,6 +298,92 @@ def _normalizar_destino(nombre: str) -> str:
     return alias.get(destino, destino)
 
 
+PRECIO_MINIMO = Decimal("4")
+PRECIO_MAXIMO = Decimal("45")
+PRECIO_TIPICO = (Decimal("8"), Decimal("30"))
+TOLERANCIA_FACTURACION = Decimal("1")
+
+
+def _es_entero(valor: Decimal) -> bool:
+    return valor == valor.to_integral_value()
+
+
+def _candidatos_precio(valor: Decimal) -> list[Decimal]:
+    """Lecturas posibles del precio por caja.
+
+    El OCR suele perder la coma decimal: 16,50 llega como 1650 y
+    16,00 como 160 o 1600.
+    """
+    if not _es_entero(valor):
+        if PRECIO_MINIMO <= valor <= PRECIO_MAXIMO:
+            return [valor]
+        return []
+    candidatos: list[Decimal] = []
+    for divisor in (Decimal("1"), Decimal("10"), Decimal("100")):
+        candidato = (valor / divisor).quantize(Decimal("0.01"))
+        if PRECIO_MINIMO <= candidato <= PRECIO_MAXIMO:
+            candidatos.append(candidato)
+    return candidatos
+
+
+def _coincide_facturacion(
+    cajas: int,
+    precio: Decimal,
+    siguientes: list[Decimal],
+) -> bool:
+    esperado = cajas * precio
+    for valor in siguientes:
+        for divisor in (Decimal("1"), Decimal("100")):
+            if abs(valor / divisor - esperado) <= TOLERANCIA_FACTURACION:
+                return True
+    return False
+
+
+def _leer_fila_por_pallets(
+    valores: list[Decimal],
+) -> tuple[int, Decimal] | None:
+    """Fila 'plt | caja/plt | total cajas | €/caja | facturación'.
+
+    El total de cajas se valida con plt × caja/plt, que resiste
+    totales dañados por el OCR, y el precio se confirma con la
+    facturación cuando es legible.
+    """
+    if len(valores) < 3:
+        return None
+    pallets, cajas_por_pallet = valores[0], valores[1]
+    if not (_es_entero(pallets) and _es_entero(cajas_por_pallet)):
+        return None
+    if not (1 <= pallets <= 60 and 20 <= cajas_por_pallet <= 200):
+        return None
+
+    cajas = int(pallets * cajas_por_pallet)
+    tercero = valores[2]
+    inicio_precio = (
+        3 if _es_entero(tercero) and int(tercero) == cajas else 2
+    )
+
+    primero_valido: Decimal | None = None
+    for indice in range(inicio_precio, len(valores)):
+        candidatos = _candidatos_precio(valores[indice])
+        if not candidatos:
+            continue
+        siguientes = valores[indice + 1:]
+        for candidato in candidatos:
+            if _coincide_facturacion(cajas, candidato, siguientes):
+                return cajas, candidato
+        if primero_valido is None:
+            tipicos = [
+                c
+                for c in candidatos
+                if PRECIO_TIPICO[0] <= c <= PRECIO_TIPICO[1]
+            ]
+            primero_valido = (tipicos or candidatos)[0]
+
+    if primero_valido is None:
+        return None
+    return cajas, primero_valido
+
+
 def _extraer_precios(texto: str) -> tuple[LineaPrecioOrsero, ...]:
     lineas = [ln.strip() for ln in texto.splitlines() if ln.strip()]
     destino_actual = ""
@@ -320,6 +406,21 @@ def _extraer_precios(texto: str) -> tuple[LineaPrecioOrsero, ...]:
 
         calibre = _interpretar_calibre_ocr(cal.group(1))
         if calibre is None:
+            continue
+
+        por_pallets = _leer_fila_por_pallets(
+            _numeros_en_linea(linea[cal.end():])
+        )
+        if por_pallets is not None:
+            total_cajas, precio = por_pallets
+            precios.append(
+                LineaPrecioOrsero(
+                    destino=destino_actual,
+                    calibre=calibre,
+                    total_cajas=total_cajas,
+                    precio_eur=precio,
+                )
+            )
             continue
 
         try:
