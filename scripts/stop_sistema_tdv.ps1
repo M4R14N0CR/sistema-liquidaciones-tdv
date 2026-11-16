@@ -1,4 +1,5 @@
-# Detiene runserver y workers del Sistema TDV iniciados por start_sistema_tdv.ps1
+# Detiene el servidor web (waitress) y los workers del Sistema TDV
+# iniciados por start_sistema_tdv.ps1
 
 $ErrorActionPreference = "SilentlyContinue"
 $Root = Split-Path -Parent $PSScriptRoot
@@ -7,6 +8,7 @@ Get-CimInstance Win32_Process -Filter "Name='python.exe'" | Where-Object {
     $_.CommandLine -and
     $_.CommandLine -like "*$Root*" -and
     (
+        $_.CommandLine -like "*waitress*config.wsgi*" -or
         $_.CommandLine -like "*manage.py*runserver*" -or
         $_.CommandLine -like "*procesar_generaciones_*"
     )
